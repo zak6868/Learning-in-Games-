@@ -1,0 +1,408 @@
+"""Cutting-plane algorithm for low-regret recommendations (Algorithm 5).
+
+Paper reference: Section 5 of "Learning to Recommend in Unknown Games."
+
+Implementation uses the Analytic Center Cutting-Plane Method (ACCPM)
+following Boyd, Vandenberghe, Skaf (Stanford EE364b notes).
+
+The knowledge set after t cuts is:
+    C_t = { w in [-1,1]^N : <w, q_s> >= 0  for s = 1..t }
+
+The analytic center minimizes the log-barrier:
+    phi(w) = -sum_s log(<w, q_s>) - sum_j [log(1+w_j) + log(1-w_j)]
+
+Newton's method (infeasible start) computes this center.
+Constraint pruning keeps at most max_cuts active constraints.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from time import perf_counter
+
+import numpy as np
+from numpy.typing import NDArray
+from scipy.linalg import cho_factor, cho_solve
+
+from .types import GameSpec, OracleResult
+from .oracle import SeparationOracle
+
+
+# =====================================================================
+# ACCPM: Analytic center of the knowledge set
+# =====================================================================
+
+
+def analytic_center(
+    cuts: NDArray[np.float64],
+    w_init: NDArray[np.float64],
+    box_radius: float = 1.0,
+    max_newton: int = 50,
+    tol: float = 1e-8,
+    alpha: float = 0.01,
+    beta: float = 0.5,
+) -> NDArray[np.float64]:
+    """Compute the analytic center of the knowledge set via Newton's method.
+
+    Knowledge set:
+        { w in [-R, R]^N : Q^T w >= 0 }  (cuts stored as columns of Q)
+
+    Minimizes the log-barrier:
+        phi(w) = -sum_s log(q_s^T w) - sum_j [log(R + w_j) + log(R - w_j)]
+
+    Uses damped Newton with backtracking line search.
+    Warm-started from w_init (previous analytic center).
+
+    Parameters
+    ----------
+    cuts : shape (N, t), each column is a cut normal q_s
+    w_init : shape (N,), starting point (must be strictly feasible)
+    box_radius : R, the box half-width
+    max_newton : max Newton iterations
+    tol : convergence tolerance on Newton decrement
+    alpha, beta : backtracking line search parameters
+
+    Returns
+    -------
+    w : shape (N,), the analytic center
+
+    Reference: Boyd, Vandenberghe, Skaf, "ACCPM Notes", Section 2.
+    """
+    N = len(w_init)
+    t = cuts.shape[1] if cuts.ndim == 2 else 0
+    R = box_radius
+    w = w_init.copy()
+
+    # Ensure strict feasibility: all slacks > 0
+    if t > 0:
+        slacks = cuts.T @ w
+        if np.min(slacks) <= 1e-10:
+            w = _find_strictly_feasible(cuts, R)
+
+    for iteration in range(max_newton):
+        # Slacks for cut constraints: s_k = q_k^T w  (must be > 0)
+        if t > 0:
+            cut_slacks = cuts.T @ w                     # (t,)
+        # Slacks for box constraints
+        upper_slack = R - w                             # (N,)
+        lower_slack = R + w                             # (N,)
+
+        # --- Gradient ---
+        # g = -sum_s q_s / (q_s^T w)  +  1/(R-w) - 1/(R+w)
+        g = 1.0 / upper_slack - 1.0 / lower_slack      # box part
+        if t > 0:
+            g -= cuts @ (1.0 / cut_slacks)              # cut part
+
+        # --- Hessian ---
+        # H = sum_s q_s q_s^T / (q_s^T w)^2  +  diag(box)
+        # Box diagonal: 1/(R+w_j)^2 + 1/(R-w_j)^2
+        H_diag = 1.0 / lower_slack**2 + 1.0 / upper_slack**2  # (N,)
+
+        # --- Newton step via Woodbury ---
+        # H = diag(D) + Q_s @ Q_s^T  where D = H_diag, Q_s = cuts/slacks
+        # H^{-1} g = D^{-1} g - D^{-1} Q_s (I + Q_s^T D^{-1} Q_s)^{-1} Q_s^T D^{-1} g
+        # Cost: O(N t^2) instead of O(N^3) when t << N
+        if not np.all(np.isfinite(g)):
+            break
+        D_inv = 1.0 / np.maximum(H_diag, 1e-15)  # (N,)
+        D_inv_g = D_inv * g                        # (N,)
+
+        if t > 0:
+            Q_scaled = cuts / cut_slacks[np.newaxis, :]  # (N, t)
+            if not np.all(np.isfinite(Q_scaled)):
+                break
+            D_inv_Q = D_inv[:, np.newaxis] * Q_scaled      # (N, t)
+            # M_small = I_t + Q_s^T D^{-1} Q_s  -- (t, t) matrix
+            M_small = np.eye(t) + Q_scaled.T @ D_inv_Q     # (t, t)
+            try:
+                L_small, low = cho_factor(M_small, check_finite=False)
+                # Woodbury: H^{-1} g = D^{-1} g - D^{-1} Q (M^{-1}) Q^T D^{-1} g
+                v = Q_scaled.T @ D_inv_g                    # (t,)
+                v = cho_solve((L_small, low), v, check_finite=False)  # (t,)
+                dw = -(D_inv_g - D_inv_Q @ v)
+            except np.linalg.LinAlgError:
+                dw = -D_inv_g
+        else:
+            dw = -D_inv_g
+
+        # Newton decrement: lambda^2 = -g^T dw
+        newton_dec_sq = float(-g @ dw)
+        if newton_dec_sq < 0:
+            # Numerical issue -- g and dw not aligned
+            break
+        if newton_dec_sq / 2 < tol:
+            break
+
+        # --- Backtracking line search ---
+        step = 1.0
+        phi_0 = _barrier_value(w, cuts, t, R)
+        accepted = False
+        for _ in range(50):
+            w_new = w + step * dw
+            # Check strict feasibility
+            if np.all(w_new > -R + 1e-12) and np.all(w_new < R - 1e-12):
+                if t == 0 or np.all(cuts.T @ w_new > 1e-12):
+                    phi_new = _barrier_value(w_new, cuts, t, R)
+                    if np.isfinite(phi_new) and phi_new <= phi_0 + alpha * step * (g @ dw):
+                        accepted = True
+                        break
+            step *= beta
+        if not accepted:
+            break  # Newton stalled, return current w
+
+        w = w + step * dw
+
+    return w
+
+
+def _find_strictly_feasible(
+    cuts: NDArray[np.float64],
+    R: float,
+) -> NDArray[np.float64]:
+    """Find a strictly feasible point via Chebyshev center LP.
+
+    max r  s.t.  Q^T w >= r * ||q_s||  for all s,  -R+r <= w_j <= R-r, r >= 0
+    This is an LP in (w, r) with N+1 variables.
+    """
+    from scipy.optimize import linprog
+
+    N, t = cuts.shape
+    cut_norms = np.linalg.norm(cuts, axis=0)  # (t,)
+
+    # Variables: [w (N), r (1)]
+    # Minimize -r  (maximize inscribed ball radius)
+    c = np.zeros(N + 1)
+    c[-1] = -1.0
+
+    # Cut constraints: q_s^T w - ||q_s|| * r >= 0  =>  -q_s^T w + ||q_s|| * r <= 0
+    A_ub_cuts = np.column_stack([-cuts.T, cut_norms])  # (t, N+1)
+
+    # Box constraints: w_j + r <= R  and  -w_j + r <= R
+    I_N = np.eye(N)
+    ones_r = np.ones((N, 1))
+    A_box_upper = np.column_stack([I_N, ones_r])    # w_j + r <= R
+    A_box_lower = np.column_stack([-I_N, ones_r])   # -w_j + r <= R
+    b_box = np.full(N, R)
+
+    A_ub = np.vstack([A_ub_cuts, A_box_upper, A_box_lower])
+    b_ub = np.concatenate([np.zeros(t), b_box, b_box])
+
+    bounds = [(-R, R)] * N + [(0, R)]
+
+    result = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method="highs")
+    if result.success and result.x[-1] > 1e-12:
+        return result.x[:N]
+
+    # Fallback: return origin (might not be feasible)
+    return np.zeros(N)
+
+
+def _barrier_value(
+    w: NDArray[np.float64],
+    cuts: NDArray[np.float64],
+    t: int,
+    R: float,
+) -> float:
+    """Evaluate the log-barrier phi(w)."""
+    val = -np.sum(np.log(R + w)) - np.sum(np.log(R - w))
+    if t > 0:
+        cut_slacks = cuts.T @ w
+        if np.any(cut_slacks <= 0):
+            return np.inf
+        val -= np.sum(np.log(cut_slacks))
+    return val
+
+
+def compute_relevance(
+    w: NDArray[np.float64],
+    cuts: NDArray[np.float64],
+    H_inv_diag: NDArray[np.float64] | None = None,
+) -> NDArray[np.float64]:
+    """Relevance score for each cut (lower = more relevant).
+
+    Boyd's irrelevance measure (Section 3):
+        rho_s = (q_s^T w) / ||H^{-1/2} q_s||
+
+    Cuts with large rho are redundant and can be pruned.
+    Simplified: use slack as the relevance score (cheap, effective).
+    """
+    slacks = cuts.T @ w  # (t,)
+    return slacks
+
+
+# =====================================================================
+# Cutting-plane algorithm (Algorithm 5)
+# =====================================================================
+
+
+@dataclass
+class CuttingPlaneResult:
+    """Results of running the cutting-plane algorithm."""
+
+    T: int
+    cumulative_regret: NDArray[np.float64]      # shape (T,)
+    w_error: NDArray[np.float64]                # ||w(t)-w*||/||w*||, shape (T,)
+    n_deviations: int                           # total deviations observed
+    n_cuts: int                                 # total cuts accumulated
+    timings: dict = field(default_factory=dict)
+
+
+class CuttingPlaneAlgorithm:
+    """Algorithm 5: Low-regret recommendations via cutting-plane.
+
+    At each round:
+        1. Compute w(t) = analytic center of knowledge set
+        2. Query oracle: CE(w(t)) -> recommend -> observe -> cut
+        3. If deviation: add cut, update knowledge set
+        4. If no deviation: reuse x(t), zero regret
+
+    Paper: Section 5, Algorithm 5.
+    """
+
+    def __init__(
+        self,
+        oracle: SeparationOracle,
+        box_radius: float = 1.0,
+        max_cuts: int | None = None,
+        newton_tol: float = 1e-8,
+        max_newton: int = 50,
+    ):
+        """
+        Parameters
+        ----------
+        oracle : the separation oracle (guess -> CE -> interact -> cut)
+        box_radius : R, half-width of the box constraint
+        max_cuts : max constraints to keep (pruning). None = 5*N.
+        newton_tol : convergence tolerance for Newton
+        max_newton : max Newton iterations per center computation
+        """
+        self.oracle = oracle
+        self.spec = oracle.spec
+        self.N = self.spec.N
+        self.R = box_radius
+        self.max_cuts = max_cuts if max_cuts is not None else 5 * self.N
+        self.newton_tol = newton_tol
+        self.max_newton = max_newton
+
+    def run(
+        self,
+        T: int,
+        w_star: NDArray[np.float64] | None = None,
+        verbose: bool = False,
+    ) -> CuttingPlaneResult:
+        """Run the cutting-plane algorithm for T rounds.
+
+        Parameters
+        ----------
+        T : number of rounds
+        w_star : true w-vector (for tracking convergence, optional)
+        verbose : print progress
+
+        Returns
+        -------
+        CuttingPlaneResult
+        """
+        N = self.N
+
+        # Storage
+        cum_regret = np.zeros(T)
+        w_error = np.zeros(T)
+        cuts_matrix = np.empty((N, 0), dtype=np.float64)  # columns = cuts
+        w = np.zeros(N)  # initial query point (center of box)
+        w_norm = float(np.linalg.norm(w_star)) if w_star is not None else 1.0
+
+        n_deviations = 0
+        update = True
+        last_result: OracleResult | None = None
+
+        t_center = 0.0
+        t_oracle = 0.0
+
+        for t in range(T):
+            # --- Compute query point ---
+            if update and cuts_matrix.shape[1] > 0:
+                t0 = perf_counter()
+                w = analytic_center(
+                    cuts_matrix, w,
+                    box_radius=self.R,
+                    max_newton=self.max_newton,
+                    tol=self.newton_tol,
+                )
+                t_center += perf_counter() - t0
+
+            # --- Clamp w to box interior before querying ---
+            w = np.clip(w, -self.R * 0.99, self.R * 0.99)
+
+            # --- Query oracle ---
+            t0 = perf_counter()
+            try:
+                result = self.oracle.query(w)
+            except RuntimeError:
+                # CE infeasible (numerical issue) -- reset to center
+                w = np.zeros(N)
+                result = self.oracle.query(w)
+            t_oracle += perf_counter() - t0
+
+            # --- Process result ---
+            if result.deviated:
+                n_deviations += 1
+                q = result.cut
+                # Normalize cut for numerical stability
+                q_norm = np.linalg.norm(q)
+                if q_norm > 1e-15:
+                    q = q / q_norm
+
+                # Add cut
+                cuts_matrix = np.column_stack([cuts_matrix, q])
+
+                # Prune if too many cuts
+                if cuts_matrix.shape[1] > self.max_cuts:
+                    cuts_matrix, w = self._prune(cuts_matrix, w)
+
+                update = True
+                last_result = result
+            else:
+                update = False
+
+            # --- Log ---
+            regret_t = result.regret if result.deviated else 0.0
+            cum_regret[t] = (cum_regret[t - 1] if t > 0 else 0.0) + regret_t
+            if w_star is not None:
+                w_error[t] = float(np.linalg.norm(w - w_star)) / max(w_norm, 1e-15)
+
+            if verbose and (t + 1) % max(1, T // 20) == 0:
+                print(
+                    f"  t={t+1:5d}  cuts={cuts_matrix.shape[1]:4d}  "
+                    f"cum_regret={cum_regret[t]:.4f}  "
+                    f"w_err={w_error[t]:.4f}",
+                    flush=True,
+                )
+
+        return CuttingPlaneResult(
+            T=T,
+            cumulative_regret=cum_regret,
+            w_error=w_error,
+            n_deviations=n_deviations,
+            n_cuts=cuts_matrix.shape[1],
+            timings={
+                "center_total": t_center,
+                "oracle_total": t_oracle,
+                "center_per_call": t_center / max(n_deviations, 1),
+                "oracle_per_call": t_oracle / T,
+            },
+        )
+
+    def _prune(
+        self,
+        cuts_matrix: NDArray[np.float64],
+        w: NDArray[np.float64],
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        """Drop the least relevant cuts (largest slack = most redundant).
+
+        Boyd, Section 3: keep constraints with smallest slack at the
+        analytic center. Drop the rest.
+        """
+        slacks = cuts_matrix.T @ w  # (t,)
+        # Keep the max_cuts cuts with smallest slack (most active)
+        keep_idx = np.argsort(slacks)[: self.max_cuts]
+        return cuts_matrix[:, keep_idx], w
