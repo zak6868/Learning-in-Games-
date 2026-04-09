@@ -159,42 +159,37 @@ def _find_strictly_feasible(
     cuts: NDArray[np.float64],
     R: float,
 ) -> NDArray[np.float64]:
-    """Find a strictly feasible point via Chebyshev center LP.
+    """Find a strictly interior point by averaging cut normals.
 
-    max r  s.t.  Q^T w >= r * ||q_s||  for all s,  -R+r <= w_j <= R-r, r >= 0
-    This is an LP in (w, r) with N+1 variables.
+    Fast O(N*t) heuristic: move from the origin along the average
+    direction of all cuts, scaled to stay inside the box.
+    Falls back to solving a Chebyshev LP if the heuristic fails.
     """
-    from scipy.optimize import linprog
-
     N, t = cuts.shape
-    cut_norms = np.linalg.norm(cuts, axis=0)  # (t,)
+    # Heuristic: average cut direction, scaled
+    direction = cuts.sum(axis=1)  # (N,)
+    d_norm = np.linalg.norm(direction)
+    if d_norm > 1e-15:
+        w = direction / d_norm * R * 0.5
+        w = np.clip(w, -R * 0.9, R * 0.9)
+        slacks = cuts.T @ w
+        if np.min(slacks) > 1e-10:
+            return w
 
-    # Variables: [w (N), r (1)]
-    # Minimize -r  (maximize inscribed ball radius)
-    c = np.zeros(N + 1)
-    c[-1] = -1.0
+    # Iterative feasibility push (cheap, no LP)
+    w = np.zeros(N)
+    for _ in range(200):
+        slacks = cuts.T @ w
+        min_s = np.min(slacks)
+        if min_s > 1e-8:
+            return w
+        worst = int(np.argmin(slacks))
+        q = cuts[:, worst]
+        step = (0.01 * R - slacks[worst]) / (q @ q + 1e-15)
+        w = w + step * q
+        w = np.clip(w, -R * 0.95, R * 0.95)
 
-    # Cut constraints: q_s^T w - ||q_s|| * r >= 0  =>  -q_s^T w + ||q_s|| * r <= 0
-    A_ub_cuts = np.column_stack([-cuts.T, cut_norms])  # (t, N+1)
-
-    # Box constraints: w_j + r <= R  and  -w_j + r <= R
-    I_N = np.eye(N)
-    ones_r = np.ones((N, 1))
-    A_box_upper = np.column_stack([I_N, ones_r])    # w_j + r <= R
-    A_box_lower = np.column_stack([-I_N, ones_r])   # -w_j + r <= R
-    b_box = np.full(N, R)
-
-    A_ub = np.vstack([A_ub_cuts, A_box_upper, A_box_lower])
-    b_ub = np.concatenate([np.zeros(t), b_box, b_box])
-
-    bounds = [(-R, R)] * N + [(0, R)]
-
-    result = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method="highs")
-    if result.success and result.x[-1] > 1e-12:
-        return result.x[:N]
-
-    # Fallback: return origin (might not be feasible)
-    return np.zeros(N)
+    return w
 
 
 def _barrier_value(
