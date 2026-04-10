@@ -368,6 +368,71 @@ def exp6_gamma_effect():
     print(f"  Saved to {OUT}/exp6_gamma_effect.pdf\n")
 
 
+# ═══════════════════════════════════════════════════════════════
+# Experiment 7: Moderator vs No-Moderator (MW baseline)
+# ═══════════════════════════════════════════════════════════════
+
+def exp7_moderator_vs_baseline():
+    print("=== Exp 7: Moderator (γ-BR) vs No-Moderator (MW) ===")
+
+    from recommend_unknown_games.baselines import run_multiplicative_weights
+
+    games = {
+        "(3,3)": (3, 3),
+        "(2,)×5": (2,) * 5,
+        "(2,)×7": (2,) * 7,
+    }
+    T = 1000
+    gamma = 0.01
+
+    fig, axes = plt.subplots(1, len(games), figsize=(5 * len(games), 5))
+
+    for idx, (label, ac) in enumerate(games.items()):
+        ax = axes[idx]
+
+        # --- Moderator ---
+        print(f"  {label} Moderator ...", end=" ", flush=True)
+        result_mod, spec, elapsed = run_experiment(ac, T, gamma=gamma)
+        print(f"done ({elapsed:.1f}s)")
+
+        # --- No moderator (MW) ---
+        print(f"  {label} MW baseline ...", end=" ", flush=True)
+        game = NormalFormGame.random_game(ac, seed=42)
+        result_mw = run_multiplicative_weights(game, T, seed=42)
+        print("done")
+
+        ts = np.arange(1, T + 1)
+
+        # Moderator: avg swap regret across players
+        mod_sr = np.mean(result_mod.player_swap_regret, axis=1)
+        ax.plot(ts, mod_sr, "-", color="C0", linewidth=2,
+                label="Moderator (γ-BR)")
+
+        # MW: avg swap regret across players
+        mw_sr = np.mean(result_mw.player_swap_regret, axis=1)
+        ax.plot(ts, mw_sr, "--", color="C1", linewidth=2,
+                label="No moderator (MW)")
+
+        # Reference: sqrt(T)
+        ax.plot(ts, np.sqrt(ts) * mw_sr[-1] / np.sqrt(T), ":",
+                color="gray", alpha=0.5, label="$O(\\sqrt{T})$ ref")
+
+        ax.set_xlabel("Round $t$")
+        ax.set_ylabel("Avg player swap regret")
+        ax.set_title(f"Game {label}")
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3)
+
+    plt.suptitle(
+        "Player swap regret: Moderator ($\\gamma$-BR) vs Independent MW",
+        fontsize=14, y=1.02,
+    )
+    plt.tight_layout()
+    plt.savefig(f"{OUT}/exp7_moderator_vs_mw.pdf", bbox_inches="tight")
+    plt.savefig(f"{OUT}/exp7_moderator_vs_mw.png", dpi=150, bbox_inches="tight")
+    print(f"  Saved to {OUT}/exp7_moderator_vs_mw.pdf\n")
+
+
 if __name__ == "__main__":
     import os
     os.makedirs(OUT, exist_ok=True)
@@ -379,5 +444,6 @@ if __name__ == "__main__":
     exp4_w_convergence()
     exp5_platform_vs_player()
     exp6_gamma_effect()
+    exp7_moderator_vs_baseline()
 
     print("All experiments done.")
