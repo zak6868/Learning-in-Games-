@@ -208,6 +208,47 @@ def _barrier_value(
     return val
 
 
+def _dist_to_equivalence_class(
+    w: NDArray[np.float64],
+    w_star: NDArray[np.float64],
+    spec: GameSpec,
+) -> float:
+    """Distance from w to the equivalence class of w* (Definition 4).
+
+    Two games are equivalent if for each agent i:
+        v_i(a_i, .) = lambda_i * u_i(a_i, .) + t_i
+
+    In terms of w-vectors (utility differences), translations cancel:
+        w'_i = lambda_i * w_i    (lambda_i > 0)
+
+    So the distance is:
+        min_{lambda_1,...,lambda_n > 0} ||w - diag(lambda) w*||
+
+    Solved per agent: lambda_i* = max(eps, <w_i, w*_i> / ||w*_i||^2)
+    """
+    residual_sq = 0.0
+    offset = 0
+    for i in range(spec.n):
+        m_i = spec.action_counts[i]
+        d_i = spec.d[i]
+        block_size = (m_i - 1) * d_i
+
+        w_i = w[offset : offset + block_size]
+        ws_i = w_star[offset : offset + block_size]
+
+        ws_norm_sq = float(ws_i @ ws_i)
+        if ws_norm_sq > 1e-30:
+            lam_i = max(1e-15, float(w_i @ ws_i) / ws_norm_sq)
+            residual_sq += float(np.sum((w_i - lam_i * ws_i) ** 2))
+        else:
+            residual_sq += float(np.sum(w_i ** 2))
+
+        offset += block_size
+
+    w_star_norm = float(np.linalg.norm(w_star))
+    return float(np.sqrt(residual_sq)) / max(w_star_norm, 1e-15)
+
+
 def compute_relevance(
     w: NDArray[np.float64],
     cuts: NDArray[np.float64],
@@ -309,14 +350,14 @@ class CuttingPlaneAlgorithm:
         w = np.zeros(N)
         w_norm = float(np.linalg.norm(w_star)) if w_star is not None else 1.0
 
-        # Swap regret tracking: for each player i, record
-        # u_i(a_i(t), a_{-i}(t)) for each action a_i(t) actually played,
-        # and accumulate utility per (recommended -> played) swap pair
-        # swap_utility[i][a, b] = sum_t u_i(b, a_{-i}(t)) * 1[a_i(t) == a]
-        # actual_utility[i] = sum_t u_i(a_i(t), a_{-i}(t))
+        # Swap regret tracking (swap_regret_br.pdf):
+        # swap_gains[i][a][b] = sum_{t: R_i(t)=a} u_i(b, R_{-i}(t))
+        # actual_utility[i] = sum_t u_i(R(t))
+        # deviation_penalty = 2 * #{rounds where any agent deviated}
         swap_gains = [[np.zeros(action_counts[i]) for _ in range(action_counts[i])]
                       for i in range(n)]
         actual_utility = [0.0 for _ in range(n)]
+        deviation_penalty = 0.0
         player_swap_regret = np.zeros((T, n))
 
         n_deviations = 0
@@ -348,36 +389,45 @@ class CuttingPlaneAlgorithm:
                 result = self.oracle.query(w)
             t_oracle += perf_counter() - t0
 
-            # --- Swap regret tracking ---
-            # a(t) = recommendation played by compliant agents
-            # a*(t) = what agents actually did (= a(t) under compliance,
-            #         but a*(t) if deviated)
-            # Under γ-BR compliance: agents follow, so played = recommended
-            a_played = result.recommendation
-            a_others = result.response  # what actually happened
+            # --- Swap regret tracking (following swap_regret_br.pdf) ---
+            # The swap regret bound decomposes into:
+            #   (I)  recommendation swap regret: uses R(t) (recommendations)
+            #   (II) deviation penalty: 2 * Pr(A(t) != R(t))
+            #
+            # For compliant agents under γ-BR, A_i(t) = R_i(t).
+            # The relevant a_{-i} is R_{-i}(t) (the joint recommendation),
+            # NOT the realized actions (which include deviations).
+            #
+            # This matches eq (1) of the document where expectation is
+            # over R(t) ~ x(t).
 
+            rec = result.recommendation   # R(t): what was recommended
+            resp = result.response        # A(t): what was actually played
             game = self.oracle.game
+
             for i in range(n):
-                a_i = a_played[i]
-                # Utility of each alternative action given what others played
+                r_i = rec[i]  # recommended action for agent i
+                # Swap gains use the RECOMMENDATION profile R(t)
                 for b in range(action_counts[i]):
-                    # u_i(b, a_{-i}(t)) where a_{-i} is the actual actions
-                    profile = list(a_others)
+                    profile = list(rec)
                     profile[i] = b
                     u_b = game.utilities[i][tuple(profile)]
-                    swap_gains[i][a_i][b] += u_b
+                    swap_gains[i][r_i][b] += u_b
 
-                u_actual = game.utilities[i][tuple(a_others)]
-                actual_utility[i] += u_actual
+                u_rec = game.utilities[i][tuple(rec)]
+                actual_utility[i] += u_rec
+
+            # Deviation penalty: 2 per round where any agent deviated
+            if result.deviated:
+                deviation_penalty += 2.0
 
             # Per-player swap regret at time t:
-            # R_i(t) = max_psi sum_{s<=t} [u_i(psi(a_i(s)), a_{-i}(s)) - u_i(a_i(s), a_{-i}(s))]
-            # = max over all swap functions psi : sum_a sum_{s: a_i(s)=a} u_i(psi(a), a_{-i}(s)) - actual
-            # = sum_a max_b swap_gains[i][a][b] - actual_utility[i]
+            # R_i = sum_a max_b swap_gains[i][a][b] - actual_utility[i]
+            #        + deviation_penalty  (term II from the document)
             for i in range(n):
                 sr = sum(np.max(swap_gains[i][a]) for a in range(action_counts[i])) \
                      - actual_utility[i]
-                player_swap_regret[t, i] = max(sr, 0.0)
+                player_swap_regret[t, i] = max(sr, 0.0) + deviation_penalty
 
             # --- Process result ---
             if result.deviated:
@@ -397,7 +447,7 @@ class CuttingPlaneAlgorithm:
             regret_t = result.regret if result.deviated else 0.0
             cum_regret[t] = (cum_regret[t - 1] if t > 0 else 0.0) + regret_t
             if w_star is not None:
-                w_error[t] = float(np.linalg.norm(w - w_star)) / max(w_norm, 1e-15)
+                w_error[t] = _dist_to_equivalence_class(w, w_star, self.spec)
 
             if verbose and (t + 1) % max(1, T // 20) == 0:
                 avg_sr = np.mean(player_swap_regret[t])

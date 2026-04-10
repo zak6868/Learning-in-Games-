@@ -223,32 +223,45 @@ def exp3_br_vs_qr():
 # ═══════════════════════════════════════════════════════════════
 
 def exp4_w_convergence():
-    print("=== Exp 4: Convergence of w(t) to w* ===")
+    print("=== Exp 4: Convergence of w(t) to equivalence class ===")
 
     games = {
         "(3,3)": (3, 3),
         "(2,)×5": (2,) * 5,
         "(2,)×7": (2,) * 7,
-        "(10,10)": (10, 10),
     }
     T = 500
 
-    fig, ax = plt.subplots(figsize=(7, 5))
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
     for label, ac in games.items():
-        print(f"  {label} ...", end=" ", flush=True)
-        result, spec, elapsed = run_experiment(ac, T)
+        # BR
+        print(f"  {label} BR ...", end=" ", flush=True)
+        result_br, spec, elapsed = run_experiment(ac, T, model="best_response")
         print(f"done ({elapsed:.1f}s)")
+        axes[0].plot(np.arange(1, T + 1), result_br.w_error,
+                     label=f"{label} (N={spec.N})")
 
-        ax.plot(np.arange(1, T + 1), result.w_error,
-                label=f"{label} (N={spec.N})")
+        # QR
+        print(f"  {label} QR ...", end=" ", flush=True)
+        result_qr, spec, elapsed = run_experiment(ac, T, model="quantal_response", beta=2.0)
+        print(f"done ({elapsed:.1f}s)")
+        axes[1].plot(np.arange(1, T + 1), result_qr.w_error,
+                     label=f"{label} (N={spec.N})")
 
-    ax.set_xlabel("Round $t$")
-    ax.set_ylabel("$\\|w(t) - w^*\\| / \\|w^*\\|$")
-    ax.set_title("Convergence of utility estimates")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+    axes[0].set_xlabel("Round $t$")
+    axes[0].set_ylabel("$d(w(t), [w^*])$ / $\\|w^*\\|$")
+    axes[0].set_title("BR feedback (not learnable — Thm 5)")
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3)
 
+    axes[1].set_xlabel("Round $t$")
+    axes[1].set_ylabel("$d(w(t), [w^*])$ / $\\|w^*\\|$")
+    axes[1].set_title("QR feedback (learnable — Thm 4)")
+    axes[1].legend()
+    axes[1].grid(True, alpha=0.3)
+
+    plt.suptitle("Distance to equivalence class: BR vs QR", fontsize=15, y=1.02)
     plt.tight_layout()
     plt.savefig(f"{OUT}/exp4_w_convergence.pdf", bbox_inches="tight")
     plt.savefig(f"{OUT}/exp4_w_convergence.png", dpi=150, bbox_inches="tight")
