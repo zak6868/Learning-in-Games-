@@ -350,14 +350,12 @@ class CuttingPlaneAlgorithm:
         w = np.zeros(N)
         w_norm = float(np.linalg.norm(w_star)) if w_star is not None else 1.0
 
-        # Swap regret tracking (swap_regret_br.pdf):
-        # swap_gains[i][a][b] = sum_{t: R_i(t)=a} u_i(b, R_{-i}(t))
-        # actual_utility[i] = sum_t u_i(R(t))
-        # deviation_penalty = 2 * #{rounds where any agent deviated}
+        # Swap regret tracking:
+        # swap_gains[i][a][b] = sum_{t: A_i(t)=a} u_i(b, A_{-i}(t))
+        # actual_utility[i] = sum_t u_i(A(t))
         swap_gains = [[np.zeros(action_counts[i]) for _ in range(action_counts[i])]
                       for i in range(n)]
         actual_utility = [0.0 for _ in range(n)]
-        deviation_penalty = 0.0
         player_swap_regret = np.zeros((T, n))
 
         n_deviations = 0
@@ -389,45 +387,35 @@ class CuttingPlaneAlgorithm:
                 result = self.oracle.query(w)
             t_oracle += perf_counter() - t0
 
-            # --- Swap regret tracking (following swap_regret_br.pdf) ---
-            # The swap regret bound decomposes into:
-            #   (I)  recommendation swap regret: uses R(t) (recommendations)
-            #   (II) deviation penalty: 2 * Pr(A(t) != R(t))
+            # --- Swap regret tracking ---
+            # Swap regret of player i (eq. 1 of swap_regret_br.pdf):
+            #   R_i = max_psi sum_t [u_i(psi(A_i(t)), A_{-i}(t)) - u_i(A_i(t), A_{-i}(t))]
             #
-            # For compliant agents under γ-BR, A_i(t) = R_i(t).
-            # The relevant a_{-i} is R_{-i}(t) (the joint recommendation),
-            # NOT the realized actions (which include deviations).
+            # Use the REALIZED action profile A(t):
+            #   - A_i(t) = R_i(t) for compliant agents (γ-BR)
+            #   - A_j(t) = response of agent j (may deviate)
             #
-            # This matches eq (1) of the document where expectation is
-            # over R(t) ~ x(t).
+            # This is the actual swap regret experienced by the players.
 
-            rec = result.recommendation   # R(t): what was recommended
-            resp = result.response        # A(t): what was actually played
+            realized = result.response   # A(t): what was actually played
             game = self.oracle.game
 
             for i in range(n):
-                r_i = rec[i]  # recommended action for agent i
-                # Swap gains use the RECOMMENDATION profile R(t)
+                a_i = realized[i]
                 for b in range(action_counts[i]):
-                    profile = list(rec)
+                    profile = list(realized)
                     profile[i] = b
                     u_b = game.utilities[i][tuple(profile)]
-                    swap_gains[i][r_i][b] += u_b
+                    swap_gains[i][a_i][b] += u_b
 
-                u_rec = game.utilities[i][tuple(rec)]
-                actual_utility[i] += u_rec
+                u_actual = game.utilities[i][tuple(realized)]
+                actual_utility[i] += u_actual
 
-            # Deviation penalty: 2 per round where any agent deviated
-            if result.deviated:
-                deviation_penalty += 2.0
-
-            # Per-player swap regret at time t:
-            # R_i = sum_a max_b swap_gains[i][a][b] - actual_utility[i]
-            #        + deviation_penalty  (term II from the document)
+            # Per-player swap regret at time t
             for i in range(n):
                 sr = sum(np.max(swap_gains[i][a]) for a in range(action_counts[i])) \
                      - actual_utility[i]
-                player_swap_regret[t, i] = max(sr, 0.0) + deviation_penalty
+                player_swap_regret[t, i] = max(sr, 0.0)
 
             # --- Process result ---
             if result.deviated:
