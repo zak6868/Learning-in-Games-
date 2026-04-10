@@ -235,7 +235,8 @@ class CuttingPlaneResult:
     """Results of running the cutting-plane algorithm."""
 
     T: int
-    cumulative_regret: NDArray[np.float64]      # shape (T,)
+    cumulative_regret: NDArray[np.float64]      # shape (T,) -- platform compliance regret
+    player_swap_regret: NDArray[np.float64]     # shape (T, n) -- per-player swap regret
     w_error: NDArray[np.float64]                # ||w(t)-w*||/||w*||, shape (T,)
     n_deviations: int                           # total deviations observed
     n_cuts: int                                 # total cuts accumulated
@@ -298,17 +299,28 @@ class CuttingPlaneAlgorithm:
         CuttingPlaneResult
         """
         N = self.N
+        n = self.spec.n
+        action_counts = self.spec.action_counts
 
         # Storage
         cum_regret = np.zeros(T)
         w_error = np.zeros(T)
-        cuts_matrix = np.empty((N, 0), dtype=np.float64)  # columns = cuts
-        w = np.zeros(N)  # initial query point (center of box)
+        cuts_matrix = np.empty((N, 0), dtype=np.float64)
+        w = np.zeros(N)
         w_norm = float(np.linalg.norm(w_star)) if w_star is not None else 1.0
+
+        # Swap regret tracking: for each player i, record
+        # u_i(a_i(t), a_{-i}(t)) for each action a_i(t) actually played,
+        # and accumulate utility per (recommended -> played) swap pair
+        # swap_utility[i][a, b] = sum_t u_i(b, a_{-i}(t)) * 1[a_i(t) == a]
+        # actual_utility[i] = sum_t u_i(a_i(t), a_{-i}(t))
+        swap_gains = [[np.zeros(action_counts[i]) for _ in range(action_counts[i])]
+                      for i in range(n)]
+        actual_utility = [0.0 for _ in range(n)]
+        player_swap_regret = np.zeros((T, n))
 
         n_deviations = 0
         update = True
-        last_result: OracleResult | None = None
 
         t_center = 0.0
         t_oracle = 0.0
@@ -325,7 +337,6 @@ class CuttingPlaneAlgorithm:
                 )
                 t_center += perf_counter() - t0
 
-            # --- Clamp w to box interior before querying ---
             w = np.clip(w, -self.R * 0.99, self.R * 0.99)
 
             # --- Query oracle ---
@@ -333,49 +344,74 @@ class CuttingPlaneAlgorithm:
             try:
                 result = self.oracle.query(w)
             except RuntimeError:
-                # CE infeasible (numerical issue) -- reset to center
                 w = np.zeros(N)
                 result = self.oracle.query(w)
             t_oracle += perf_counter() - t0
+
+            # --- Swap regret tracking ---
+            # a(t) = recommendation played by compliant agents
+            # a*(t) = what agents actually did (= a(t) under compliance,
+            #         but a*(t) if deviated)
+            # Under γ-BR compliance: agents follow, so played = recommended
+            a_played = result.recommendation
+            a_others = result.response  # what actually happened
+
+            game = self.oracle.game
+            for i in range(n):
+                a_i = a_played[i]
+                # Utility of each alternative action given what others played
+                for b in range(action_counts[i]):
+                    # u_i(b, a_{-i}(t)) where a_{-i} is the actual actions
+                    profile = list(a_others)
+                    profile[i] = b
+                    u_b = game.utilities[i][tuple(profile)]
+                    swap_gains[i][a_i][b] += u_b
+
+                u_actual = game.utilities[i][tuple(a_others)]
+                actual_utility[i] += u_actual
+
+            # Per-player swap regret at time t:
+            # R_i(t) = max_psi sum_{s<=t} [u_i(psi(a_i(s)), a_{-i}(s)) - u_i(a_i(s), a_{-i}(s))]
+            # = max over all swap functions psi : sum_a sum_{s: a_i(s)=a} u_i(psi(a), a_{-i}(s)) - actual
+            # = sum_a max_b swap_gains[i][a][b] - actual_utility[i]
+            for i in range(n):
+                sr = sum(np.max(swap_gains[i][a]) for a in range(action_counts[i])) \
+                     - actual_utility[i]
+                player_swap_regret[t, i] = max(sr, 0.0)
 
             # --- Process result ---
             if result.deviated:
                 n_deviations += 1
                 q = result.cut
-                # Normalize cut for numerical stability
                 q_norm = np.linalg.norm(q)
                 if q_norm > 1e-15:
                     q = q / q_norm
-
-                # Add cut
                 cuts_matrix = np.column_stack([cuts_matrix, q])
-
-                # Prune if too many cuts
                 if cuts_matrix.shape[1] > self.max_cuts:
                     cuts_matrix, w = self._prune(cuts_matrix, w)
-
                 update = True
-                last_result = result
             else:
                 update = False
 
-            # --- Log ---
+            # --- Log platform regret ---
             regret_t = result.regret if result.deviated else 0.0
             cum_regret[t] = (cum_regret[t - 1] if t > 0 else 0.0) + regret_t
             if w_star is not None:
                 w_error[t] = float(np.linalg.norm(w - w_star)) / max(w_norm, 1e-15)
 
             if verbose and (t + 1) % max(1, T // 20) == 0:
+                avg_sr = np.mean(player_swap_regret[t])
                 print(
                     f"  t={t+1:5d}  cuts={cuts_matrix.shape[1]:4d}  "
                     f"cum_regret={cum_regret[t]:.4f}  "
-                    f"w_err={w_error[t]:.4f}",
+                    f"avg_swap_regret={avg_sr:.4f}",
                     flush=True,
                 )
 
         return CuttingPlaneResult(
             T=T,
             cumulative_regret=cum_regret,
+            player_swap_regret=player_swap_regret,
             w_error=w_error,
             n_deviations=n_deviations,
             n_cuts=cuts_matrix.shape[1],

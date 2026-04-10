@@ -34,11 +34,12 @@ plt.rcParams.update({
 OUT = "/Users/owhadigroup/Desktop/Recommend in Unkown Games/figures"
 
 
-def run_experiment(action_counts, T, model="best_response", beta=2.0, seed=42):
+def run_experiment(action_counts, T, model="best_response", beta=2.0,
+                   gamma=0.0, seed=42):
     """Run cutting-plane and return result."""
     game = NormalFormGame.random_game(action_counts, seed=seed)
     solver = CESolver(game.spec, backend="gurobi")
-    feedback = AgentFeedback(game, model=model, beta=beta, seed=seed)
+    feedback = AgentFeedback(game, model=model, beta=beta, gamma=gamma, seed=seed)
     oracle = SeparationOracle(game, solver, feedback, seed=seed + 1)
     w_star = game.pack_w()
     algo = CuttingPlaneAlgorithm(oracle, box_radius=1.0)
@@ -258,6 +259,102 @@ def exp4_w_convergence():
 # Main
 # ═══════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════════
+# Experiment 5: Platform regret vs Player swap regret
+# ═══════════════════════════════════════════════════════════════
+
+def exp5_platform_vs_player():
+    print("=== Exp 5: Platform compliance regret vs Player swap regret ===")
+
+    games = {
+        "(3,3)": (3, 3),
+        "(2,)×5": (2,) * 5,
+        "(2,)×7": (2,) * 7,
+    }
+    T = 500
+    gamma = 0.01  # γ-BR threshold
+
+    fig, axes = plt.subplots(1, len(games), figsize=(5 * len(games), 5))
+
+    for idx, (label, ac) in enumerate(games.items()):
+        ax = axes[idx]
+        print(f"  {label} (γ={gamma}) ...", end=" ", flush=True)
+        result, spec, elapsed = run_experiment(ac, T, gamma=gamma)
+        print(f"done ({elapsed:.1f}s, devs={result.n_deviations})")
+
+        ts = np.arange(1, T + 1)
+
+        # Platform compliance regret
+        ax.plot(ts, result.cumulative_regret, "-", color="C0",
+                label="Platform regret")
+
+        # Average player swap regret
+        avg_swap = np.mean(result.player_swap_regret, axis=1)
+        ax.plot(ts, avg_swap, "--", color="C1",
+                label="Avg player swap regret")
+
+        # Max player swap regret
+        max_swap = np.max(result.player_swap_regret, axis=1)
+        ax.plot(ts, max_swap, ":", color="C2",
+                label="Max player swap regret")
+
+        ax.set_xlabel("Round $t$")
+        ax.set_ylabel("Regret")
+        ax.set_title(f"Game {label} ($\\gamma$={gamma})")
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3)
+
+    plt.suptitle("Platform compliance regret vs Player swap regret ($\\gamma$-BR)",
+                 fontsize=14, y=1.02)
+    plt.tight_layout()
+    plt.savefig(f"{OUT}/exp5_platform_vs_player.pdf", bbox_inches="tight")
+    plt.savefig(f"{OUT}/exp5_platform_vs_player.png", dpi=150, bbox_inches="tight")
+    print(f"  Saved to {OUT}/exp5_platform_vs_player.pdf\n")
+
+
+# ═══════════════════════════════════════════════════════════════
+# Experiment 6: Effect of γ on swap regret
+# ═══════════════════════════════════════════════════════════════
+
+def exp6_gamma_effect():
+    print("=== Exp 6: Effect of γ on player swap regret ===")
+
+    ac = (3, 3)
+    T = 500
+    gammas = [0.0, 0.001, 0.01, 0.05, 0.1]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    for gamma in gammas:
+        print(f"  γ={gamma} ...", end=" ", flush=True)
+        result, spec, elapsed = run_experiment(ac, T, gamma=gamma)
+        print(f"done (devs={result.n_deviations})")
+
+        ts = np.arange(1, T + 1)
+        axes[0].plot(ts, result.cumulative_regret,
+                     label=f"$\\gamma$={gamma}")
+        axes[1].plot(ts, np.mean(result.player_swap_regret, axis=1),
+                     label=f"$\\gamma$={gamma}")
+
+    axes[0].set_xlabel("Round $t$")
+    axes[0].set_ylabel("Cumulative regret")
+    axes[0].set_title("Platform compliance regret")
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3)
+
+    axes[1].set_xlabel("Round $t$")
+    axes[1].set_ylabel("Average swap regret")
+    axes[1].set_title("Player swap regret")
+    axes[1].legend()
+    axes[1].grid(True, alpha=0.3)
+
+    plt.suptitle(f"Effect of $\\gamma$ on regrets — Game (3,3)", fontsize=14, y=1.02)
+    plt.tight_layout()
+    plt.savefig(f"{OUT}/exp6_gamma_effect.pdf", bbox_inches="tight")
+    plt.savefig(f"{OUT}/exp6_gamma_effect.png", dpi=150, bbox_inches="tight")
+    print(f"  Saved to {OUT}/exp6_gamma_effect.pdf\n")
+
+
 if __name__ == "__main__":
     import os
     os.makedirs(OUT, exist_ok=True)
@@ -267,5 +364,7 @@ if __name__ == "__main__":
     exp2_regret_vs_nM()
     exp3_br_vs_qr()
     exp4_w_convergence()
+    exp5_platform_vs_player()
+    exp6_gamma_effect()
 
     print("All experiments done.")

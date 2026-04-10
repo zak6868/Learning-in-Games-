@@ -171,6 +171,7 @@ class AgentFeedback:
         game: NormalFormGame,
         model: str = "best_response",
         beta: float = 1.0,
+        gamma: float = 0.0,
         seed: int = 42,
     ):
         """
@@ -179,12 +180,15 @@ class AgentFeedback:
         game : the true underlying game
         model : "best_response" or "quantal_response"
         beta : rationality parameter for QR (paper eq. 3)
+        gamma : threshold for gamma-BR. Agent deviates only if gain > gamma.
+                gamma=0 is standard BR. gamma>0 is needed for swap regret bound.
         seed : RNG seed
         """
         assert model in ("best_response", "quantal_response")
         self.game = game
         self.model = model
         self.beta = beta
+        self.gamma = gamma
         self.rng = np.random.default_rng(seed)
 
     def _expected_utilities(
@@ -222,9 +226,9 @@ class AgentFeedback:
 
         if self.model == "best_response":
             # Paper Def. 2: BR_i(x, a_i) = argmax_{a'_i} u^x_i(a'_i | a_i)
-            # If the recommended action a_i is tied for best, agent follows.
+            # gamma-BR: agent follows if gain over recommended action <= gamma
             best_val = np.max(expected)
-            if expected[a_i] >= best_val - 1e-12:
+            if expected[a_i] >= best_val - self.gamma - 1e-12:
                 return a_i
             return int(np.argmax(expected))
 
