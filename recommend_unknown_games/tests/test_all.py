@@ -297,6 +297,40 @@ class TestCESolver:
         for row_idx, (i, a_i, a_prime) in enumerate(solver._constraint_map):
             row = A.getrow(row_idx)
             assert row.nnz == spec.d[i]
+    
+    def test_matrix_antisymmetry_of_rows(self):
+        """Row for (i, a_i, a'_i) should be the negative of row for (i, a'_i, a_i)."""
+        spec = GameSpec.from_action_counts((3, 4, 3))
+        solver = CESolver(spec, backend="scipy")
+        w = np.random.default_rng(0).standard_normal(spec.N)
+        A = solver.build_constraint_matrix(w)
+
+        # Build a lookup from (i, a_i, a_prime) -> row index
+        row_lookup = {
+            (i, a_i, a_prime): idx
+            for idx, (i, a_i, a_prime) in enumerate(solver._constraint_map)
+        }
+
+        for (i, a_i, a_prime), row_idx in row_lookup.items():
+            reverse_key = (i, a_prime, a_i)
+            if reverse_key in row_lookup:
+                reverse_idx = row_lookup[reverse_key]
+                np.testing.assert_allclose(
+                    np.sort(A[row_idx].toarray()), np.sort(-A[reverse_idx].toarray()), atol=1e-14,
+                    err_msg=f"Antisymmetry failed for agent={i}, ({a_i},{a_prime})"
+                )
+
+    def test_constraint_matrix_updates_with_but_pattern_fixed(self):
+        """Different w should produce different constraint matrices."""
+        spec = GameSpec.from_action_counts((3, 4, 3))
+        solver = CESolver(spec, backend="scipy")
+        w1 = np.random.default_rng(0).standard_normal(spec.N)
+        w2 = np.random.default_rng(1).standard_normal(spec.N)
+        A1 = solver.build_constraint_matrix(w1)
+        A2 = solver.build_constraint_matrix(w2)
+        diff = (A1 != 0).astype(int) - (A2 != 0).astype(int)
+        assert not np.allclose(A1.toarray(), A2.toarray())
+        assert diff.nnz == 0
 
 
 # ===================================================================
