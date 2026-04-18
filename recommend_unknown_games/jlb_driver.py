@@ -182,6 +182,51 @@ def random_y_schedule(
     return sched
 
 
+def structured_y_schedule(
+    spec, n_iter: int, seed: int = 0
+) -> Callable[[int], NDArray[np.float64]]:
+    """Outer-loop schedule that mixes canonical "push-to-action-k" y's with
+    random perturbations.
+
+    A "push-to-k" y has Y_p[j, k] = 1 for all j != k, driving each player's
+    Markov chain toward the absorbing state k.  The oracle then produces the
+    pure Nash candidate (k, k, ..., k).  Cycling through all possible target
+    actions k gives the oracle a chance to propose every "all-same" profile,
+    which in many structured games (congestion, Pigou, etc.) are natural
+    Nash candidates.
+    """
+    rng = np.random.default_rng(seed)
+    N = y_dim(spec)
+    max_m = max(spec.action_counts)
+    # Pre-compute push-to-k y vectors for each k in 0..max_m-1
+    push_vecs = []
+    for k in range(max_m):
+        y = np.zeros(N)
+        offset = 0
+        for i, m_i in enumerate(spec.action_counts):
+            if k < m_i:
+                for j in range(m_i):
+                    if j != k:
+                        y[offset + j * m_i + k] = 1.0
+            offset += m_i * m_i
+        push_vecs.append(y)
+
+    random_pool = rng.uniform(0.0, 1.0, size=(n_iter, N))
+
+    def sched(t: int) -> NDArray[np.float64]:
+        # Rotate through canonical pushes in the first `max_m` iterations,
+        # then a mix of push + noise, then pure random.
+        if t < max_m:
+            return push_vecs[t].copy()
+        if t < 3 * max_m:
+            base = push_vecs[t % max_m]
+            noise = rng.uniform(0, 0.2, size=N)
+            return base + noise
+        return random_pool[t]
+
+    return sched
+
+
 def run_jlb(
     game: CompactGame,
     max_iterations: int = 200,
@@ -209,7 +254,7 @@ def run_jlb(
     """
     spec = game.spec
     if y_schedule is None:
-        y_schedule = random_y_schedule(spec, max_iterations, seed=seed)
+        y_schedule = structured_y_schedule(spec, max_iterations, seed=seed)
 
     profiles: list[tuple[int, ...]] = []
     profiles_set: set[tuple[int, ...]] = set()  # avoid duplicates
