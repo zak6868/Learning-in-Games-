@@ -21,18 +21,29 @@ class TestEllipsoidBasics:
         assert E.log_vol_ratio == 0.0
 
     def test_cut_central(self):
-        """Central cut (alpha=0): volume shrinks by factor N^{N} / (N+1)^N * (N^2 / (N^2-1))^{N/2}.
+        """Central cut (alpha=0): volume shrinks by the classical factor
 
-        This is the classic (N^2/(N^2-1))^{N/2} * (N/(N+1)) ratio.
+            new_vol / old_vol = delta^(N/2) * sqrt(1 - sigma)
+
+        where for alpha=0:  delta = N^2/(N^2-1),  sigma = 2/(N+1),
+        giving  (N/(N+1)) * (N/sqrt(N^2-1))^{N-1}.
         """
         N = 4
         E = Ellipsoid.ball(N=N, radius=1.0)
-        # Central cut through origin, g = e_1, h = 0
         g = np.zeros(N); g[0] = 1.0
         status = E.apply_cut(g, h=0.0)
         assert status == "cut"
-        # Volume should have decreased
-        assert E.log_vol_ratio < 0
+
+        # Expected log-volume-ratio for a central cut:
+        sigma = 2.0 / (N + 1.0)
+        delta = (N * N) / (N * N - 1.0)
+        expected = 0.5 * (N * np.log(delta) + np.log(1.0 - sigma))
+        assert np.isclose(E.log_vol_ratio, expected, atol=1e-12), (
+            f"log_vol_ratio={E.log_vol_ratio}, expected {expected}"
+        )
+        # Specifically: for N=4, sigma = 2/5, delta = 16/15
+        # Expected = 0.5 * (4 * log(16/15) + log(3/5)) ~ -0.127
+        assert -0.15 < E.log_vol_ratio < -0.10
 
     def test_cut_deep_exact(self):
         """A cut with alpha very close to 1 should be nearly degenerate,

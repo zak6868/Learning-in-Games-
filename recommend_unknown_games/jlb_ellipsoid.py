@@ -56,6 +56,7 @@ def run_jlb_ellipsoid(
     min_log_vol_ratio: float = -300.0,
     reconstruct_every: int = 20,
     reconstruct_backend: str = "auto",
+    seed: int = 0,
     verbose: bool = False,
 ) -> EllipsoidJLBResult:
     """Run JLB with an ellipsoid outer loop.
@@ -78,6 +79,7 @@ def run_jlb_ellipsoid(
     """
     spec = game.spec
     N = y_dim(spec)
+    rng = np.random.default_rng(seed)
 
     # Start with the center slightly inside the positive orthant.
     # An initial center of 0 sits exactly on the y >= 0 boundary, which
@@ -98,16 +100,19 @@ def run_jlb_ellipsoid(
     ellipsoid = Ellipsoid.ball(N, initial_radius, center=c0)
 
     consecutive_redundant = 0
+    infeasible_attempts = 0  # How many times an "infeasible" status fired without CE found
 
     for t in range(max_iterations):
         y = ellipsoid.c
 
         # Priority 1: y_i >= 0 constraint
         neg_idx = int(np.argmin(y))
+        used_nonnegativity_cut = False
         if y[neg_idx] < -1e-12:
             g = np.zeros(N)
             g[neg_idx] = -1.0
             h = 0.0  # -y_i <= 0  <=> y_i >= 0
+            used_nonnegativity_cut = True
         else:
             # Priority 2: JLB oracle cut
             t0 = perf_counter()
@@ -127,11 +132,33 @@ def run_jlb_ellipsoid(
         if verbose and (t < 5 or (t + 1) % max(1, max_iterations // 30) == 0):
             print(f"  iter {t+1:5d}  #prof={len(profiles):4d}  "
                   f"log_vol={ellipsoid.log_vol_ratio:+.2f}  "
-                  f"status={status}", flush=True)
+                  f"status={status}"
+                  f"{' (y>=0 cut)' if used_nonnegativity_cut else ''}", flush=True)
 
         if status == "infeasible":
-            stopped_reason = "infeasible_certified"
-            break
+            # Try reconstruction with current profiles.  If it succeeds we're
+            # done.  Otherwise we don't yet have enough JLB cuts; perturb the
+            # center back into the interior of the orthant and continue.
+            t0 = perf_counter()
+            alpha = reconstruct_ce_mixture(game, profiles, backend=reconstruct_backend)
+            t_reconstruct += perf_counter() - t0
+            if alpha is not None:
+                reconstructed = True
+                stopped_reason = "ce_reconstructed_on_infeasible"
+                break
+            # Not enough cuts yet: reset the center to a random interior point
+            # of the positive orthant to elicit a different profile from the
+            # oracle.  We reset P as well (otherwise the ellipsoid stays tiny
+            # and the same center would dominate).
+            infeasible_attempts += 1
+            if infeasible_attempts > 50:
+                stopped_reason = "infeasible_cert_without_enough_cuts"
+                break
+            shrink = 0.5 ** infeasible_attempts  # progressively smaller radius
+            new_radius = max(initial_radius * shrink, 0.1)
+            ellipsoid.c = rng.uniform(0.05, 1.0, size=N) * initial_radius
+            ellipsoid.P = (new_radius ** 2) * np.eye(N)
+            continue
         if status == "null_cut":
             stopped_reason = "null_cut"
             break

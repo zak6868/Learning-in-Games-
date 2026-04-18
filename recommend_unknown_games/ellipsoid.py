@@ -98,12 +98,14 @@ class Ellipsoid:
         # Symmetrize for numerical stability
         self.P = 0.5 * (self.P + self.P.T)
 
-        # Volume ratio update: new/old = delta^{N/2} * sqrt(1 - sigma * alpha^*) ...
-        # The exact factor under deep-cut update is delta^{N/2} * (1 - sigma).
-        # Track log of volume ratio additively.
-        vol_factor_sq = (delta ** N) * (1.0 - sigma) ** 2 if sigma < 1 else (delta ** N) * 1e-30
-        if vol_factor_sq > 0:
-            self.log_vol_ratio += 0.5 * np.log(vol_factor_sq)
+        # Volume ratio update.
+        # For the deep-cut update P_new = delta * (P - (sigma/gtPg) * Pg Pg^T):
+        #   det(P_new) = delta^N * det(P) * (1 - sigma)
+        # and volume(E_new) / volume(E_old) = sqrt(det(P_new) / det(P))
+        #                                   = delta^(N/2) * sqrt(1 - sigma)
+        # So log(vol_new / vol_old) = (N/2) * log(delta) + (1/2) * log(1 - sigma).
+        if sigma < 1.0 and delta > 0.0:
+            self.log_vol_ratio += 0.5 * (N * np.log(delta) + np.log(1.0 - sigma))
         else:
             self.log_vol_ratio += -1e6  # effectively zero volume
 
