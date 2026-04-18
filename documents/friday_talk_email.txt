@@ -1,0 +1,19 @@
+Subject: Friday Lunch Talk: Learning to Recommend in Unknown Games
+
+Hi everyone,
+
+This Friday at lunch, I'll be giving a talk about recent work I've been jointly working on with collaborators at UC Berkeley.
+
+Title: Learning to Recommend in Unknown Games
+
+Abstract:
+We study preference learning through recommendations in multi-agent game settings, where a moderator repeatedly interacts with agents whose utility functions are unknown. In each round, the moderator commits to a recommendation mechanism, privately suggests actions, and observes whether agents follow or deviate. We consider two canonical behavioral feedback models — best response and quantal response — and characterize what each reveals about the underlying game.
+
+We establish a learnability separation: under quantal-response feedback, the game utilities are identifiable up to a positive affine equivalence class with logarithmic sample complexity, whereas best-response feedback admits a strictly larger indistinguishability set, which we fully characterize via the normal fan structure of utility polytopes. We introduce a regret notion based on agents' incentives to deviate from recommendations and construct an online cutting-plane algorithm achieving O(nM log T) cumulative regret under both feedback models, where n is the number of agents and M the size of the joint action space. We further show that under a mild rationality threshold, compliant agents achieve O(nM log T) swap regret — in contrast to the Ω(√T) lower bound for decentralized no-regret learners — establishing a formal incentive for agents to follow the moderator.
+
+We validate the theoretical predictions with computational experiments on games with up to 12 agents, demonstrating convergence to correlated equilibria and the gap between centralized and decentralized learning.
+
+Looking forward to the discussion!
+
+Best,
+Zakaria

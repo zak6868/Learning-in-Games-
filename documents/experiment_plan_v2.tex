@@ -1,0 +1,323 @@
+\documentclass[11pt]{article}
+\usepackage[margin=0.9in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{multicol}
+
+\definecolor{maincolor}{RGB}{0,70,130}
+\definecolor{done}{RGB}{0,120,0}
+\definecolor{todo}{RGB}{180,0,0}
+\hypersetup{colorlinks=true,linkcolor=maincolor,urlcolor=maincolor}
+
+\newcommand{\bigO}{\mathcal{O}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\CE}{\mathrm{CE}}
+\newcommand{\status}[1]{\textcolor{done}{\textbf{[#1]}}}
+\newcommand{\TODO}[1]{\textcolor{todo}{\textbf{[#1]}}}
+
+\title{\textbf{Complete Work Plan: Experiments \& Implementation} \\ \large Learning to Recommend in Unknown Games --- NeurIPS 2026}
+\author{}
+\date{April 2026 --- v2 (post literature survey)}
+
+\begin{document}
+\maketitle
+
+%==========================================================================
+\section{Current Status}
+%==========================================================================
+
+\subsection{What is implemented and tested}
+\begin{itemize}[nosep]
+    \item \status{Done} Normal-form game environment with BR, QR, and $\gamma$-BR feedback
+    \item \status{Done} CE solver (Gurobi, sparse, scales to $M{=}32{,}768$)
+    \item \status{Done} Separation oracle (Algorithm~4, 48 tests passing)
+    \item \status{Done} Cutting-plane algorithm (ACCPM with Woodbury, scales to $N{=}24{,}576$)
+    \item \status{Done} Player swap regret tracking
+    \item \status{Done} MW baseline (no moderator)
+    \item \status{Done} Preliminary plots (7 experiments, all running)
+\end{itemize}
+
+\subsection{What is missing (from literature survey)}
+\begin{itemize}[nosep]
+    \item \TODO{TODO} Canonical benchmark games (Prisoner's Dilemma, Shapley, Braess)
+    \item \TODO{TODO} $\varepsilon$-CE gap / NashConv metric
+    \item \TODO{TODO} Baselines: random recommendation, oracle, regret matching
+    \item \TODO{TODO} Log-log regret plots
+    \item \TODO{TODO} Compact pipeline for congestion games
+    \item \TODO{TODO} Sioux Falls or real-network experiment
+\end{itemize}
+
+%==========================================================================
+\section{Work Plan: Phase 1 --- Benchmark Games and Metrics}
+%==========================================================================
+
+\textit{Estimated time: 2--3 hours coding + 1 hour running.}
+
+\subsection{Task 1.1: Add canonical benchmark games}
+
+Implement named game constructors in \texttt{game.py}:
+
+\begin{enumerate}[nosep]
+    \item \textbf{Prisoner's Dilemma} (2 players, 2 actions):
+    \[
+    u_1 = \begin{pmatrix} -1 & -3 \\ 0 & -2 \end{pmatrix}, \quad
+    u_2 = \begin{pmatrix} -1 & 0 \\ -3 & -2 \end{pmatrix}
+    \]
+
+    \item \textbf{Shapley Game} (2 players, 3 actions): the classic game where best-response dynamics cycle but CE exists.
+    \[
+    u_1 = \begin{pmatrix} 1 & 0 & 0 \\ 0 & 1 & 0 \\ 0 & 0 & 1 \end{pmatrix}, \quad
+    u_2 = \begin{pmatrix} 0 & 1 & 0 \\ 0 & 0 & 1 \\ 1 & 0 & 0 \end{pmatrix}
+    \]
+
+    \item \textbf{Matching Pennies} (2 players, 2 actions): zero-sum.
+
+    \item \textbf{Chicken / Hawk-Dove} (2 players, 2 actions): multiple NE, non-trivial CE.
+
+    \item \textbf{Theorem~5 counterexample} (2 players, $4 \times 2$): already in tests, expose as named constructor.
+\end{enumerate}
+
+\subsection{Task 1.2: Add $\varepsilon$-CE gap metric (NashConv)}
+
+The $\varepsilon$-CE gap is the maximum incentive to deviate from the recommendation:
+\[
+\varepsilon\text{-CE}(x) \;=\; \max_{i \in [n]} \;\max_{a_i, a_i' \in A_i} \;\phi_i(a_i, a_i', x)
+\]
+This is the standard metric in the no-regret $\to$ CE literature. Implement as a method on \texttt{NormalFormGame} and track it per-round in \texttt{CuttingPlaneAlgorithm}.
+
+Add to \texttt{CuttingPlaneResult}: field \texttt{ce\_gap: NDArray} of shape $(T,)$.
+
+\subsection{Task 1.3: Add baselines}
+
+Add to \texttt{baselines.py}:
+
+\begin{enumerate}[nosep]
+    \item \textbf{Random recommendation:} $x(t) = \text{Uniform}(\Delta(A))$ every round. No learning. Lower bound.
+
+    \item \textbf{Oracle:} $x(t) \in \CE(w^\star)$ (true game known). Zero compliance regret after first round. Upper bound.
+
+    \item \textbf{Regret matching} (Hart--Mas-Colell): each player $i$ maintains regret vector $R_i(a_i, a_i')$ and plays proportional to positive regrets. Standard CE convergence baseline. Converges at $\bigO(\sqrt{T})$.
+
+    \item \textbf{EXP3 per player:} bandit baseline, each player learns independently. Already implemented (MW baseline). Rename for clarity.
+\end{enumerate}
+
+%==========================================================================
+\section{Work Plan: Phase 2 --- Main Paper Experiments (4 Figures)}
+%==========================================================================
+
+\textit{Estimated time: 3--4 hours running (parallelizable).}
+
+\subsection{Figure 1: Compliance Regret vs $T$ (Theorem 8)}
+
+\textbf{Goal:} Show $R(T) = \bigO(nM \log T)$.
+
+\begin{itemize}[nosep]
+    \item \textbf{Panel A:} Regret vs $t$ on log-log scale. Curves for Prisoner's Dilemma ($nM{=}8$), Shapley ($nM{=}18$), $(2,2,2)$ ($nM{=}24$), $(3,3,3)$ ($nM{=}81$), $(2,)^{\times 5}$ ($nM{=}160$).
+    \item \textbf{Panel B:} $R(t) / \log(t)$ vs $t$. Should plateau at constant $\propto nM$.
+    \item \textbf{Reference lines:} $c \cdot nM \cdot \log(t)$ fitted per curve.
+    \item Games: 5 games (3 canonical + 2 random). $T = 5{,}000$. Seeds: 30. Feedback: BR ($\gamma{=}0$).
+    \item \textbf{Baselines on same plot:} Random recommendation (linear regret), Oracle (zero).
+\end{itemize}
+
+\subsection{Figure 2: Learnability Separation --- QR vs BR (Theorems 4 \& 5)}
+
+\textbf{Goal:} QR converges to equivalence class, BR does not.
+
+\begin{itemize}[nosep]
+    \item \textbf{Panel A (QR):} Distance to equivalence class $d(w(t), [w^\star])$ vs $t$. Should $\to 0$.
+    \item \textbf{Panel B (BR):} Same metric. Should $\to$ positive constant.
+    \item \textbf{Panel C (Theorem 5 counterexample):} On game $u$ with BR, plot $d(w(t), [w^\star_u])$ and $d(w(t), [w^\star_v])$. Both small (indistinguishable). With QR, only $d(w(t), [w^\star_u]) \to 0$.
+    \item Games: Shapley $(3,3)$, $(2,)^{\times 5}$, counterexample $(4,2)$. $T = 5{,}000$. Seeds: 30.
+\end{itemize}
+
+\subsection{Figure 3: Moderator vs No-Moderator --- Swap Regret}
+
+\textbf{Goal:} Moderator gives $\bigO(\log T)$ swap regret, MW gives $\bigO(\sqrt{T})$.
+
+\begin{itemize}[nosep]
+    \item \textbf{Log-log plot.} $x$-axis: $t$ (log). $y$-axis: avg player swap regret (log).
+    \item \textbf{Curves:} Moderator ($\gamma$-BR), MW baseline, Regret Matching baseline.
+    \item \textbf{Reference slopes:} $c_1 \log(t)$ and $c_2 \sqrt{t}$.
+    \item Games: Shapley, $(2,)^{\times 5}$, $(3,3,3)$. $T = 10{,}000$. Seeds: 30.
+    \item $\gamma = 0.01$ for the moderator.
+\end{itemize}
+
+\subsection{Figure 4: $\varepsilon$-CE Gap Convergence}
+
+\textbf{Goal:} Show the recommended distribution converges to a CE of the true game.
+
+\begin{itemize}[nosep]
+    \item $x$-axis: $t$. $y$-axis: $\varepsilon$-CE gap of $x(t)$ w.r.t.\ true utilities.
+    \item \textbf{Curves:} Moderator (cutting-plane), Regret Matching, Random.
+    \item Games: Shapley, Prisoner's Dilemma, $(2,)^{\times 5}$. $T = 5{,}000$. Seeds: 30.
+    \item \textbf{Expected:} Moderator $\to 0$ fast (once CE learned, gap is zero). Regret Matching $\to 0$ at $\bigO(1/\sqrt{T})$. Random stays high.
+\end{itemize}
+
+%==========================================================================
+\section{Work Plan: Phase 3 --- Appendix Experiments (6 Figures/Tables)}
+%==========================================================================
+
+\textit{Estimated time: 4--5 hours running.}
+
+\subsection{Figure A1: Regret Scaling with $nM$ (Theorem 8)}
+\begin{itemize}[nosep]
+    \item Three curves varying $n$ (fixed $m{=}2$), $m$ (fixed $n{=}2$), $m$ (fixed $n{=}3$).
+    \item $x$-axis: $nM$ (log). $y$-axis: regret at $T{=}2{,}000$ (log). Reference: slope-1 line.
+    \item Seeds: 30.
+\end{itemize}
+
+\subsection{Figure A2: Number of Deviations vs $T$ and $nM$}
+\begin{itemize}[nosep]
+    \item Panel A: Cumulative deviations vs $t$ (semi-log). Panel B: Final deviations vs $nM$.
+    \item Seeds: 30.
+\end{itemize}
+
+\subsection{Figure A3: Effect of $\gamma$ on Swap Regret}
+\begin{itemize}[nosep]
+    \item $\gamma \in \{0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5\}$.
+    \item Panel A: Final swap regret vs $\gamma$. Panel B: Final compliance regret vs $\gamma$.
+    \item Reference: $(1+1/\gamma) \cdot nM \cdot \log T$.
+    \item Games: Shapley, $(2,)^{\times 5}$, $(3,3,3)$. $T = 5{,}000$. Seeds: 20.
+\end{itemize}
+
+\subsection{Figure A4: Platform vs Player Regret (Joint View)}
+\begin{itemize}[nosep]
+    \item Three curves: platform compliance, avg swap, max swap.
+    \item Games: Shapley, $(2,)^{\times 5}$, $(3,3,3)$. $T = 5{,}000$. Seeds: 20.
+\end{itemize}
+
+\subsection{Figure A5: Wall-Clock Time Scaling}
+\begin{itemize}[nosep]
+    \item Panel A: Time per round vs $nM$. Breakdown: CE solve, ACCPM, oracle.
+    \item Panel B: Time per round vs number of accumulated cuts.
+    \item Games: $(2,2)$ through $(2,)^{\times 12}$. $T = 200$. Seeds: 3.
+\end{itemize}
+
+\subsection{Table A1: Maximum Feasible Scale}
+\begin{itemize}[nosep]
+    \item Game, $n$, $M$, $nM$, $N$, avg time/round, deviations, final regret, memory.
+    \item Games: $(2,)^{\times 10}$, $(2,)^{\times 12}$, $(10,10,10)$, $(50,50)$.
+    \item Seeds: 3. $T = 500$.
+\end{itemize}
+
+%==========================================================================
+\section{Work Plan: Phase 4 --- Compact Pipeline for Congestion Games}
+%==========================================================================
+
+\textit{Estimated time: 1--2 days coding + testing.}
+
+\subsection{Task 4.1: Implement congestion game environment}
+\begin{itemize}[nosep]
+    \item Network $G = (V, E)$ with source-destination pairs.
+    \item Affine edge costs: $c_e(\ell) = \theta_{e,1} + \theta_{e,2} \ell$.
+    \item Route enumeration (all simple $s_i$--$t_i$ paths up to length bound).
+    \item Feature vectors $\phi_i(a)$ and difference features $\Delta\phi_i(r, r', a_{-i})$.
+    \item Parameter dimension $d = 2|E|$.
+\end{itemize}
+
+\subsection{Task 4.2: Implement compact CE solver}
+\begin{itemize}[nosep]
+    \item Product-distribution CCE: variables $f_{i,r}$ (marginals per agent per route).
+    \item LP with $\sum_i m_i$ variables instead of $M = \prod_i m_i$.
+    \item Incentive constraints using expected congestion moments.
+\end{itemize}
+
+\subsection{Task 4.3: Implement compact oracle}
+\begin{itemize}[nosep]
+    \item Cut directly in $\R^d$: $q_\theta = \Phi^\top q$ computed via expected congestion.
+    \item No enumeration of opponent profiles.
+    \item BR/QR feedback using marginals.
+\end{itemize}
+
+\subsection{Task 4.4: Implement compact cutting-plane}
+\begin{itemize}[nosep]
+    \item Reuse ACCPM in $\R^d$ (already implemented, just change dimension).
+    \item Per-round: $\theta(t) \to$ reconstruct costs $\to$ compact CE $\to$ sample $\to$ observe $\to$ cut in $\R^d$.
+\end{itemize}
+
+\subsection{Task 4.5: Congestion game experiments}
+
+\textbf{Figure 5 (Main paper):} Compact pipeline on congestion games.
+
+\begin{itemize}[nosep]
+    \item \textbf{Panel A:} Braess network (4 nodes, 5 edges, $n = 10$--$100$ agents, $d = 10$). Regret vs $T$.
+    \item \textbf{Panel B:} Sioux Falls network (24 nodes, 76 edges, $n = 100$--$500$, $d = 152$). Regret vs $T$.
+    \item \textbf{Panel C:} Scaling: regret at $T{=}2{,}000$ vs number of agents $n$ (fixed network).
+    \item Baselines: myopic routing (current estimate only), oracle, random.
+    \item $T = 2{,}000$. Seeds: 30.
+    \item Compare runtime: compact vs normal-form (on Braess where both are feasible).
+\end{itemize}
+
+\textbf{Figure A6 (Appendix):} Parameter recovery in congestion game.
+\begin{itemize}[nosep]
+    \item $\|\theta(t) - \theta^\star\| / \|\theta^\star\|$ vs $t$ on Braess network.
+    \item BR vs QR comparison (Theorems 4--5 in the congestion setting).
+\end{itemize}
+
+%==========================================================================
+\section{Work Plan: Phase 5 --- Final Polish}
+%==========================================================================
+
+\textit{Estimated time: 1 day.}
+
+\begin{enumerate}[nosep]
+    \item \textbf{Plot formatting:} NeurIPS template sizing (single/double column), 8--9pt fonts, colorblind palette, PDF export with tight bounding boxes.
+    \item \textbf{Error bands:} All plots with shaded 20th--80th percentile bands.
+    \item \textbf{Statistical summary table:} For each experiment, report median $\pm$ IQR of final metrics.
+    \item \textbf{Reproducibility:} Fixed seed sequences, requirements.txt, README with instructions.
+    \item \textbf{Commit and tag:} \texttt{git tag v1.0-neurips-submission}.
+\end{enumerate}
+
+%==========================================================================
+\section{Timeline}
+%==========================================================================
+
+\begin{table}[h]
+\centering
+\begin{tabular}{llr}
+\toprule
+\textbf{Phase} & \textbf{Content} & \textbf{Est.\ Time} \\
+\midrule
+1 & Benchmarks, metrics, baselines & 3 hours \\
+2 & Main paper figures (4) & 4 hours \\
+3 & Appendix figures (6) & 5 hours \\
+4 & Compact congestion pipeline & 12 hours \\
+5 & Polish and reproducibility & 4 hours \\
+\midrule
+& \textbf{Total} & \textbf{28 hours} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%==========================================================================
+\section{Summary: Figures for the Paper}
+%==========================================================================
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{clllc}
+\toprule
+\# & Figure & Theorem & Key message & Location \\
+\midrule
+1 & Regret vs $T$ & Thm 8 & $\bigO(nM\log T)$ compliance regret & Main \\
+2 & QR vs BR convergence & Thm 4+5 & QR learnable, BR not & Main \\
+3 & Moderator vs MW & Swap regret & $\bigO(\log T)$ vs $\bigO(\sqrt{T})$ & Main \\
+4 & $\varepsilon$-CE gap & Thm 8 & Convergence to CE & Main \\
+5 & Congestion games & Compact & Scales to $n{=}500$ agents & Main \\
+\midrule
+A1 & Regret vs $nM$ & Thm 8 & Linear in $nM$ & Appendix \\
+A2 & Deviations vs $T$ & Thm 8 & Learning efficiency & Appendix \\
+A3 & Effect of $\gamma$ & Swap regret & Tradeoff curve & Appendix \\
+A4 & Platform vs player & Joint & Both controlled & Appendix \\
+A5 & Wall-clock time & Feasibility & Runtime breakdown & Appendix \\
+A6 & Congestion recovery & Thm 4+5 & $\theta$-convergence & Appendix \\
+\midrule
+T1 & Max scale table & Scalability & Limits of normal-form & Appendix \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\end{document}
