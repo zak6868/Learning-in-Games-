@@ -1,0 +1,19 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.DS_Store
+
+# Experiment outputs (generated on the cluster; don't check in)
+experiments_overnight/out/
+logs/
+*.npz
+summary_*.csv
+
+# Keep a small example output if someone wants to check a figure in
+!experiments_overnight/out/.gitkeep
